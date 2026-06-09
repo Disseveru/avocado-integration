@@ -1,0 +1,16 @@
+{
+  "scripts": {
+    "avocado:arbitrage": "ts-node scripts/avocadoArbitrage.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@instadapp/avocado": "^0.4.5",
+    "dotenv": "^17.4.2",
+    "ethers": "^5.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}
