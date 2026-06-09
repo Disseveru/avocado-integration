@@ -1,6 +1,7 @@
 {
+  "type": "module",
   "scripts": {
-    "avocado:arbitrage": "ts-node scripts/avocadoArbitrage.ts",
+    "avocado:arbitrage": "tsx scripts/avocadoArbitrage.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -10,7 +11,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.2",
-    "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }
 }
