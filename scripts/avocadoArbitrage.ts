@@ -7,6 +7,7 @@ import { ethers } from "ethers";
 const AVOCADO_CHAIN_ID = 634;
 const AVOCADO_RPC_URL = "https://rpc.avocado.instadapp.io";
 const BASE_CHAIN_ID = 8453;
+const BASE_CHAIN_NAME = "base";
 
 const BASE_FLASHLOAN_AGGREGATOR =
   "0x3813f7a28814bfaf861192d0a5a4891b15698bac";
@@ -14,6 +15,7 @@ const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const BASE_WETH = "0x4200000000000000000000000000000000000006";
 const BASE_UNISWAP_V3_SWAP_ROUTER_02 =
   "0x2626664c2603336E57B271c5C0b26F421741e481";
+const AVO_FORWARDER_ADDRESS = "0x375F6B0CD12b34Dc28e34C26853a37012C24dDE5";
 
 const CALL_OPERATION = "0";
 const FLASHLOAN_OPERATION = "2";
@@ -39,6 +41,10 @@ const uniswapV3RouterInterface = new ethers.utils.Interface([
   "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)",
 ]);
 
+const avoForwarderInterface = new ethers.utils.Interface([
+  "function computeAddress(address owner) view returns (address)",
+]);
+
 type AvoAction = {
   target: string;
   data: string;
@@ -54,6 +60,16 @@ function requireEnv(name: string): string {
   }
 
   return value;
+}
+
+function normalizeRpcUrl(name: string, value: string): string {
+  const normalized = value.replace(/^=/, "");
+
+  if (!normalized.startsWith("https://")) {
+    throw new Error(`${name} must start with https://`);
+  }
+
+  return normalized;
 }
 
 function encodeActions(actions: AvoAction[]): string {
@@ -124,14 +140,40 @@ function buildFlashloanCallbackActions(
   ];
 }
 
+async function getExecutionSafeAddress(
+  ownerAddress: string,
+  provider: ethers.providers.Provider,
+): Promise<string> {
+  const forwarder = new ethers.Contract(
+    AVO_FORWARDER_ADDRESS,
+    avoForwarderInterface,
+    provider,
+  );
+  const safeAddress = ethers.utils.getAddress(
+    await forwarder.computeAddress(ownerAddress),
+  );
+
+  if (safeAddress === ethers.constants.AddressZero) {
+    throw new Error(
+      `Avocado legacy Safe is not configured on Base for owner ${ownerAddress}; refusing to sign or broadcast an unverifiable spell.`,
+    );
+  }
+
+  return safeAddress;
+}
+
 async function main(): Promise<void> {
   const ownerPrivateKey = requireEnv("AVOCADO_OWNER_PRIVATE_KEY");
-  const baseRpcUrl = requireEnv("BASE_RPC_URL");
+  const baseRpcUrl = normalizeRpcUrl("BASE_RPC_URL", requireEnv("BASE_RPC_URL"));
 
   setRpcUrls({
     [BASE_CHAIN_ID]: baseRpcUrl,
   });
 
+  const baseProvider = new ethers.providers.StaticJsonRpcProvider(baseRpcUrl, {
+    chainId: BASE_CHAIN_ID,
+    name: BASE_CHAIN_NAME,
+  });
   const avocadoProvider = new ethers.providers.StaticJsonRpcProvider(
     AVOCADO_RPC_URL,
     {
@@ -142,10 +184,8 @@ async function main(): Promise<void> {
   const owner = new ethers.Wallet(ownerPrivateKey, avocadoProvider);
   const safe = createSafe(owner);
 
-  const [ownerAddress, safeAddress] = await Promise.all([
-    safe.getOwnerAddress(),
-    safe.getSafeAddress(),
-  ]);
+  const ownerAddress = await safe.getOwnerAddress();
+  const safeAddress = await getExecutionSafeAddress(ownerAddress, baseProvider);
 
   const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
   const callbackActions = buildFlashloanCallbackActions(safeAddress, deadline);
@@ -176,6 +216,7 @@ async function main(): Promise<void> {
     metadata: ethers.utils.hexlify(
       ethers.utils.toUtf8Bytes("base-usdc-flashloan-arbitrage-simulation"),
     ),
+    safeAddress,
   };
 
   const message = await safe.generateSignatureMessage(
@@ -183,7 +224,13 @@ async function main(): Promise<void> {
     BASE_CHAIN_ID,
     signatureOptions,
   );
-  const signature = await safe.buildSignature(message, BASE_CHAIN_ID);
+  const signature = await safe.getSigner().buildSignature(
+    {
+      message,
+      chainId: BASE_CHAIN_ID,
+    },
+    signatureOptions,
+  );
 
   console.log("Avocado owner:", ownerAddress);
   console.log("Avocado safe:", safeAddress);
@@ -199,6 +246,7 @@ async function main(): Promise<void> {
       message,
       signature,
       BASE_CHAIN_ID,
+      safeAddress,
     );
 
     console.log("Broadcast transaction hash:", tx.hash);
