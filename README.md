@@ -154,3 +154,75 @@ Technical Architecture:
 
 <img width="1162" alt="image" src="https://user-images.githubusercontent.com/22830915/233698682-d301cf8a-6594-4053-8a9e-a985687c8410.png">
 
+## No-code Base arbitrage spell helper
+
+This repo also includes a beginner-friendly script that follows the README flow:
+
+- connect the owner wallet to Avocado Network RPC
+- initialize the Avocado Safe on chain ID `634`
+- encode a Base chain flashloan spell
+- sign the Avocado EIP-712 message
+- optionally broadcast the signed spell
+
+The script is intentionally safe by default. It will prepare and sign the spell, but it will not broadcast the built-in example swap unless you explicitly opt in. Real arbitrage needs real profitable swap calldata from a quoting/search system.
+
+### 1. Install packages
+
+```bash
+npm install
+```
+
+### 2. Create your private local `.env`
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and paste your values:
+
+```bash
+AVOCADO_OWNER_PRIVATE_KEY=0xYOUR_PRIVATE_KEY_HERE
+BASE_RPC_URL=https://mainnet.base.org
+```
+
+Optional defaults:
+
+```bash
+FLASHLOAN_AMOUNT_USDC=1000
+FLASHLOAN_ROUTE=0
+FLASHLOAN_PREMIUM_BPS=0
+```
+
+`FLASHLOAN_PREMIUM_BPS=0` represents the fee-free repayment assumption. If your selected Instadapp route charges a premium, set that value before casting.
+
+### 3. Prepare and sign the spell
+
+```bash
+npm run avocado:prepare
+```
+
+This prints:
+
+- Avocado owner address
+- Avocado Safe address
+- Base flashloan aggregator
+- encoded Avocado EIP-712 message
+- owner signature
+
+### 4. Broadcast only after real arbitrage calldata is configured
+
+The helper can accept a real swap/arbitrage payload:
+
+```bash
+ARBITRAGE_SWAP_TARGET=0x...
+ARBITRAGE_SWAP_CALLDATA=0x...
+```
+
+Then broadcast with:
+
+```bash
+npm run avocado:cast
+```
+
+If you do not provide `ARBITRAGE_SWAP_TARGET` and `ARBITRAGE_SWAP_CALLDATA`, the script refuses to broadcast by default so an example trade is not sent with your private key.
+

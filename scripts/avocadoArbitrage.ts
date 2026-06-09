@@ -19,12 +19,9 @@ const CALL_OPERATION = "0";
 const FLASHLOAN_OPERATION = "2";
 const AVOCADO_FLASHLOAN_CALL_ID = "20";
 
-const FLASHLOAN_ROUTE = 0;
-const FLASHLOAN_AMOUNT = ethers.utils.parseUnits("1000", 6);
-const ASSUMED_FLASHLOAN_PREMIUM_BPS = 9;
-const REPAY_AMOUNT = FLASHLOAN_AMOUNT.add(
-  FLASHLOAN_AMOUNT.mul(ASSUMED_FLASHLOAN_PREMIUM_BPS).div(10_000),
-);
+const DEFAULT_FLASHLOAN_AMOUNT_USDC = "1000";
+const DEFAULT_FLASHLOAN_ROUTE = "0";
+const DEFAULT_FLASHLOAN_PREMIUM_BPS = "0";
 
 const flashloanAggregatorInterface = new ethers.utils.Interface([
   "function flashLoan(address[] tokens,uint256[] amounts,uint256 route,bytes data,bytes instaData)",
@@ -56,6 +53,22 @@ function requireEnv(name: string): string {
   return value;
 }
 
+function optionalEnv(name: string, defaultValue: string): string {
+  const value = process.env[name];
+  return value && value.trim().length > 0 ? value : defaultValue;
+}
+
+function parseIntegerEnv(name: string, defaultValue: string): number {
+  const rawValue = optionalEnv(name, defaultValue);
+  const parsed = Number(rawValue);
+
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer. Received: ${rawValue}`);
+  }
+
+  return parsed;
+}
+
 function encodeActions(actions: AvoAction[]): string {
   return ethers.utils.defaultAbiCoder.encode(
     [
@@ -74,32 +87,43 @@ function encodeActions(actions: AvoAction[]): string {
 
 function buildFlashloanCallbackActions(
   safeAddress: string,
+  flashloanAmount: ethers.BigNumber,
+  repayAmount: ethers.BigNumber,
   deadline: number,
 ): AvoAction[] {
+  const customSwapTarget = process.env.ARBITRAGE_SWAP_TARGET;
+  const customSwapCalldata = process.env.ARBITRAGE_SWAP_CALLDATA;
+
   const approveRouterData = erc20Interface.encodeFunctionData("approve", [
     BASE_UNISWAP_V3_SWAP_ROUTER_02,
-    FLASHLOAN_AMOUNT,
+    flashloanAmount,
   ]);
 
-  const arbitrageSwapPayload = uniswapV3RouterInterface.encodeFunctionData(
-    "exactInputSingle",
-    [
-      {
-        tokenIn: BASE_USDC,
-        tokenOut: BASE_WETH,
-        fee: 500,
-        recipient: safeAddress,
-        deadline,
-        amountIn: FLASHLOAN_AMOUNT,
-        amountOutMinimum: 0,
-        sqrtPriceLimitX96: 0,
-      },
-    ],
-  );
+  const hasCustomSwap =
+    Boolean(customSwapTarget && customSwapTarget.trim()) &&
+    Boolean(customSwapCalldata && customSwapCalldata.trim());
+
+  const arbitrageSwapTarget = hasCustomSwap
+    ? ethers.utils.getAddress(customSwapTarget as string)
+    : BASE_UNISWAP_V3_SWAP_ROUTER_02;
+  const arbitrageSwapPayload = hasCustomSwap
+    ? (customSwapCalldata as string)
+    : uniswapV3RouterInterface.encodeFunctionData("exactInputSingle", [
+        {
+          tokenIn: BASE_USDC,
+          tokenOut: BASE_WETH,
+          fee: 500,
+          recipient: safeAddress,
+          deadline,
+          amountIn: flashloanAmount,
+          amountOutMinimum: 0,
+          sqrtPriceLimitX96: 0,
+        },
+      ]);
 
   const repayFlashloanData = erc20Interface.encodeFunctionData("transfer", [
     BASE_FLASHLOAN_AGGREGATOR,
-    REPAY_AMOUNT,
+    repayAmount,
   ]);
 
   return [
@@ -110,7 +134,7 @@ function buildFlashloanCallbackActions(
       operation: CALL_OPERATION,
     },
     {
-      target: BASE_UNISWAP_V3_SWAP_ROUTER_02,
+      target: arbitrageSwapTarget,
       data: arbitrageSwapPayload,
       value: 0,
       operation: CALL_OPERATION,
@@ -127,6 +151,40 @@ function buildFlashloanCallbackActions(
 async function main(): Promise<void> {
   const ownerPrivateKey = requireEnv("AVOCADO_OWNER_PRIVATE_KEY");
   const baseRpcUrl = requireEnv("BASE_RPC_URL");
+  const shouldBroadcast =
+    process.argv.includes("--broadcast") ||
+    process.env.BROADCAST_AVOCADO_TX === "true";
+  const hasCustomSwap =
+    Boolean(process.env.ARBITRAGE_SWAP_TARGET?.trim()) &&
+    Boolean(process.env.ARBITRAGE_SWAP_CALLDATA?.trim());
+  const allowExampleBroadcast =
+    process.env.ALLOW_EXAMPLE_BROADCAST === "true";
+
+  if (shouldBroadcast && !hasCustomSwap && !allowExampleBroadcast) {
+    throw new Error(
+      [
+        "Refusing to broadcast the built-in example swap.",
+        "Set ARBITRAGE_SWAP_TARGET and ARBITRAGE_SWAP_CALLDATA for a real opportunity,",
+        "or set ALLOW_EXAMPLE_BROADCAST=true if you intentionally want to broadcast the example.",
+      ].join(" "),
+    );
+  }
+
+  const flashloanRoute = parseIntegerEnv(
+    "FLASHLOAN_ROUTE",
+    DEFAULT_FLASHLOAN_ROUTE,
+  );
+  const assumedPremiumBps = parseIntegerEnv(
+    "FLASHLOAN_PREMIUM_BPS",
+    DEFAULT_FLASHLOAN_PREMIUM_BPS,
+  );
+  const flashloanAmount = ethers.utils.parseUnits(
+    optionalEnv("FLASHLOAN_AMOUNT_USDC", DEFAULT_FLASHLOAN_AMOUNT_USDC),
+    6,
+  );
+  const repayAmount = flashloanAmount.add(
+    flashloanAmount.mul(assumedPremiumBps).div(10_000),
+  );
 
   setRpcUrls({
     [BASE_CHAIN_ID]: baseRpcUrl,
@@ -148,15 +206,20 @@ async function main(): Promise<void> {
   ]);
 
   const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-  const callbackActions = buildFlashloanCallbackActions(safeAddress, deadline);
+  const callbackActions = buildFlashloanCallbackActions(
+    safeAddress,
+    flashloanAmount,
+    repayAmount,
+    deadline,
+  );
   const callbackData = encodeActions(callbackActions);
 
   const flashloanData = flashloanAggregatorInterface.encodeFunctionData(
     "flashLoan",
     [
       [BASE_USDC],
-      [FLASHLOAN_AMOUNT],
-      FLASHLOAN_ROUTE,
+      [flashloanAmount],
+      flashloanRoute,
       callbackData,
       "0x",
     ],
@@ -190,11 +253,16 @@ async function main(): Promise<void> {
   console.log("Signing chain:", AVOCADO_CHAIN_ID);
   console.log("Execution chain:", BASE_CHAIN_ID);
   console.log("Flashloan aggregator:", BASE_FLASHLOAN_AGGREGATOR);
+  console.log("Flashloan amount USDC:", ethers.utils.formatUnits(flashloanAmount, 6));
+  console.log("Flashloan route:", flashloanRoute);
+  console.log("Assumed premium bps:", assumedPremiumBps);
+  console.log("Repay amount USDC:", ethers.utils.formatUnits(repayAmount, 6));
+  console.log("Custom arbitrage payload:", hasCustomSwap ? "yes" : "no, using example payload");
   console.log("Encoded callback actions:", callbackActions.length);
   console.log("EIP-712 message:", JSON.stringify(message, null, 2));
   console.log("Signature:", signature);
 
-  if (process.env.BROADCAST_AVOCADO_TX === "true") {
+  if (shouldBroadcast) {
     const tx = await safe.broadcastSignedMessage(
       message,
       signature,
@@ -206,7 +274,7 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    "Dry run only. Set BROADCAST_AVOCADO_TX=true to broadcast the signed Avocado spell.",
+    "Dry run only. Run `npm run avocado:cast` to broadcast after configuring a real arbitrage payload.",
   );
 }
 
